@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#07040c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Lava Rain</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #07040c; overflow: hidden;
+    /* bez zumiranja, skrolanja i označavanja na mobitelu */
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  body { display: flex; align-items: center; justify-content: center; position: fixed; inset: 0; }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+
+  /* --- kontrole na ekranu (samo na uređajima s ekranom na dodir) --- */
+  :root { --b: min(20vh, 86px); --gap: 14px; }
+  #touch { position: fixed; inset: 0; pointer-events: none; display: none; }
+  body.touch #touch { display: block; }
+  .tbtn {
+    position: absolute; width: var(--b); height: var(--b); box-sizing: border-box;
+    background: rgba(20, 10, 30, 0.45) no-repeat center / 55%;
+    image-rendering: pixelated;
+    border: 3px solid rgba(255, 200, 120, 0.5);
+    box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.4);
+  }
+  .tbtn.down {
+    background-color: rgba(255, 154, 31, 0.5); border-color: #ffd23f;
+    box-shadow: inset 0 4px 0 rgba(0, 0, 0, 0.4);
+  }
+  #tLeft  { left: calc(env(safe-area-inset-left) + var(--gap)); bottom: calc(env(safe-area-inset-bottom) + var(--gap)); }
+  #tRight { left: calc(env(safe-area-inset-left) + var(--gap) * 2 + var(--b)); bottom: calc(env(safe-area-inset-bottom) + var(--gap)); }
+  #tJump  { right: calc(env(safe-area-inset-right) + var(--gap)); bottom: calc(env(safe-area-inset-bottom) + var(--gap));
+            width: calc(var(--b) * 1.2); height: calc(var(--b) * 1.2); }
+  #tPause { left: 50%; bottom: calc(env(safe-area-inset-bottom) + 6px); transform: translateX(-50%);
+            width: calc(var(--b) * 0.6); height: calc(var(--b) * 0.6); background-size: 45%; }
+
+  /* --- poruka "okreni mobitel" kad je mobitel uspravan --- */
+  #rotate { position: fixed; inset: 0; z-index: 10; display: none; background: #07040c;
+            align-items: center; justify-content: center; }
+  #rotate canvas { width: min(92vw, 520px); height: auto; }
+  @media (orientation: portrait) { body.touch #rotate { display: flex; } }
+</style>
+</head>
+<body>
+<canvas id="game" width="320" height="180"></canvas>
+<div id="touch">
+  <div class="tbtn" id="tLeft"></div>
+  <div class="tbtn" id="tRight"></div>
+  <div class="tbtn" id="tJump"></div>
+  <div class="tbtn" id="tPause"></div>
+</div>
+<div id="rotate"><canvas id="rotateCanvas" width="160" height="64"></canvas></div>
+<script>
+"use strict";
+
+/* =====================================================================
+   CONFIG – sve postavke igre i težine na jednom mjestu
+   ===================================================================== */
+const CONFIG = {
+  width: 320,                 // interna rezolucija
+  height: 180,
+  integerScaling: true,       // skaliranje cijelim brojem (oštriji pikseli)
+
+  player: {
+    maxSpeed: 72,             // px/s – najveća brzina hodanja
+    groundAccel: 650,         // ubrzanje na tlu
+    groundDecel: 800,         // usporavanje na tlu (trenje)
+    airAccel: 240,            // kontrola u zraku (manja = manje kontrole)
+    airDecel: 40,             // koliko se horizontalna brzina gubi u zraku
+    jumpVelocity: 195,        // jačina skoka
+    jumpSideSpeed: 62,        // min. horizontalna brzina kod skoka u stranu
+    jumpCut: 0.45,            // puštanje tipke ranije = niži skok
+    jumpBuffer: 0.1,          // s – skok pritisnut malo prije doskoka se pamti
+    gravity: 540,
+    maxFallSpeed: 320,
+    lives: 3,
+    invulnTime: 1.5,          // s neranjivosti nakon pogotka
+    knockback: 40,            // odbijanje nakon pogotka
+  },
+
+  platformTop: 120,           // y gornjeg ruba platforme
+  platformTiles: 20,          // širina platforme u tileovima (8 px)
+  lavaY: 154,                 // y površine lave
+
+  waves: {
+    bannerTime: 2.2,          // trajanje natpisa "WAVE N"
+    firstWaveDuration: 20,    // s – trajanje 1. vala
+    durationIncrease: 8,      // s – svaki sljedeći val traje toliko duže
+    fallSpeedBase: 55,        // px/s – brzina pada u 1. valu
+    fallSpeedPerWave: 9,      // + po valu
+    fallSpeedMax: 170,
+    spawnIntervalBase: 1.0,   // s – razmak spawnova u 1. valu
+    spawnIntervalPerWave: 0.09, // smanjenje razmaka po valu
+    spawnIntervalMin: 0.22,
+    spawnJitter: 0.35,        // nasumičnost razmaka (±35 %)
+    targetPlayerChance: 0.35, // udio predmeta koji ciljaju igrača
+    extraSpawnFromWave: 5,    // od ovog vala ponekad padnu 2 predmeta odjednom
+    extraSpawnPerWave: 0.07,
+    // pomicanje lijevo-desno (od swayStartWave nadalje)
+    swayStartWave: 2,
+    swayChanceBase: 0.25, swayChancePerWave: 0.12, swayChanceMax: 0.9,
+    swayAmpBase: 10, swayAmpPerWave: 5, swayAmpMax: 50,        // sinusoida (px)
+    swayFreqBase: 0.5, swayFreqPerWave: 0.06,                   // Hz
+    diagSpeedBase: 14, diagSpeedPerWave: 6, diagSpeedMax: 60,   // kosi pad (px/s)
+  },
+
+  // Tipovi predmeta: minWave = prvi val u kojem se pojavljuje, weight = učestalost
+  objects: {
+    rock:    { minWave: 1, weight: 10, speedMul: 1.00, swayMul: 1.0, hitShrink: 0.22 },
+    meteor:  { minWave: 1, weight: 4,  speedMul: 1.35, swayMul: 1.0, hitShrink: 0.22 },
+    anvil:   { minWave: 2, weight: 4,  speedMul: 1.25, swayMul: 0.5, hitShrink: 0.15 },
+    bomb:    { minWave: 3, weight: 3,  speedMul: 0.90, swayMul: 0.8, hitShrink: 0.2,
+               fuseTime: 0.9, blastRadius: 24 },
+    boulder: { minWave: 4, weight: 2,  speedMul: 0.80, swayMul: 0.4, hitShrink: 0.2 },
+  },
+
+  scorePerSecond: 10,         // bodovi po sekundi preživljavanja
+  waveBonusPerWave: 100,      // bonus = val * ovo
+  shakeOnHit: 3,              // jačina treskanja ekrana
+  shakeTime: 0.3,
+  highScoreKey: 'lavaRainHighScore',
+};
+
+const W = CONFIG.width, H = CONFIG.height;
+const PW = CONFIG.platformTiles * 8;
+const PLATFORM = { left: Math.round((W - PW) / 2), right: Math.round((W - PW) / 2) + PW, top: CONFIG.platformTop };
+
+/* =====================================================================
+   Pomoćne funkcije
+   ===================================================================== */
+const rand = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const easeInBack = t => { const c1 = 1.70158, c3 = c1 + 1; return c3 * t * t * t - c1 * t * t; };
+function seeded(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+function aabb(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+function loadHigh() {
+  try { return parseInt(localStorage.getItem(CONFIG.highScoreKey), 10) || 0; } catch (e) { return 0; }
+}
+function saveHigh(v) {
+  try { localStorage.setItem(CONFIG.highScoreKey, String(v)); } catch (e) { /* bez spremanja */ }
+}
+
+// Glatki 2D "value noise" za teksture
+function makeValueNoise(w, h, cell, R) {
+  const gw = Math.ceil(w / cell) + 2, gh = Math.ceil(h / cell) + 2, v = [];
+  for (let i = 0; i < gw * gh; i++) v.push(R());
+  return (x, y) => {
+    const fx = x / cell, fy = y / cell, ix = Math.floor(fx), iy = Math.floor(fy);
+    let tx = fx - ix, ty = fy - iy;
+    tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty);
+    const a = v[iy * gw + ix], b = v[iy * gw + ix + 1], c = v[(iy + 1) * gw + ix], d = v[(iy + 1) * gw + ix + 1];
+    return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
+  };
+}
+
+// Puni krug od piksela
+function pixelCircle(ctx, cx, cy, r, col) {
+  ctx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const w = Math.floor(Math.sqrt(r * r - dy * dy));
+    ctx.fillRect(Math.round(cx - w), Math.round(cy + dy), w * 2 + 1, 1);
+  }
+}
+
+/* =====================================================================
+   Bitmap font 5x5 (vlastiti pikselasti font)
+   ===================================================================== */
+const FONT = {
+  'A':['.###.','#...#','#####','#...#','#...#'], 'B':['####.','#...#','####.','#...#','####.'],
+  'C':['.####','#....','#....','#....','.####'], 'D':['####.','#...#','#...#','#...#','####.'],
+  'E':['#####','#....','####.','#....','#####'], 'F':['#####','#....','####.','#....','#....'],
+  'G':['.####','#....','#..##','#...#','.###.'], 'H':['#...#','#...#','#####','#...#','#...#'],
+  'I':['#####','..#..','..#..','..#..','#####'], 'J':['..###','...#.','...#.','#..#.','.##..'],
+  'K':['#...#','#..#.','###..','#..#.','#...#'], 'L':['#....','#....','#....','#....','#####'],
+  'M':['#...#','##.##','#.#.#','#...#','#...#'], 'N':['#...#','##..#','#.#.#','#..##','#...#'],
+  'O':['.###.','#...#','#...#','#...#','.###.'], 'P':['####.','#...#','####.','#....','#....'],
+  'Q':['.###.','#...#','#.#.#','#..#.','.##.#'], 'R':['####.','#...#','####.','#..#.','#...#'],
+  'S':['.####','#....','.###.','....#','####.'], 'T':['#####','..#..','..#..','..#..','..#..'],
+  'U':['#...#','#...#','#...#','#...#','.###.'], 'V':['#...#','#...#','#...#','.#.#.','..#..'],
+  'W':['#...#','#...#','#.#.#','##.##','#...#'], 'X':['#...#','.#.#.','..#..','.#.#.','#...#'],
+  'Y':['#...#','.#.#.','..#..','..#..','..#..'], 'Z':['#####','...#.','..#..','.#...','#####'],
+  '0':['.###.','#..##','#.#.#','##..#','.###.'], '1':['.##..','#.#..','..#..','..#..','#####'],
+  '2':['####.','....#','.###.','#....','#####'], '3':['####.','....#','.###.','....#','####.'],
+  '4':['#..#.','#..#.','#####','...#.','...#.'], '5':['#####','#....','####.','....#','####.'],
+  '6':['.###.','#....','####.','#...#','.###.'], '7':['#####','....#','...#.','..#..','..#..'],
+  '8':['.###.','#...#','.###.','#...#','.###.'], '9':['.###.','#...#','.####','....#','.###.'],
+  ':':['.....','..#..','.....','..#..','.....'], '!':['..#..','..#..','..#..','.....','..#..'],
+  '.':['.....','.....','.....','.....','..#..'], '-':['.....','.....','.###.','.....','.....'],
+  '/':['....#','...#.','..#..','.#...','#....'], '?':['.###.','...#.','..#..','.....','..#..'],
+  ',':['.....','.....','.....','..#..','.#...'], '+':['.....','..#..','.###.','..#..','.....'],
+  '<':['...#.','..#..','.#...','..#..','...#.'], '>':['.#...','..#..','...#.','..#..','.#...'],
+  '(':['...#.','..#..','..#..','..#..','...#.'], ')':['.#...','..#..','..#..','..#..','.#...'],
+  "'":['..#..','..#..','.....','.....','.....'], ' ':['.....','.....','.....','.....','.....'],
+  '^':['..#..','.#.#.','#...#','.....','.....'],
+};
+
+function textWidth(str, scale = 1) { return str.length ? (str.length * 6 - 1) * scale : 0; }
+
+function drawGlyphs(ctx, str, x, y, color, scale) {
+  const fn = typeof color === 'function';
+  if (!fn) ctx.fillStyle = color;
+  for (let i = 0; i < str.length; i++) {
+    const g = FONT[str[i]];
+    if (!g) continue;
+    const gx = x + i * 6 * scale;
+    for (let r = 0; r < 5; r++) {
+      if (fn) ctx.fillStyle = color(r);
+      const row = g[r];
+      for (let c = 0; c < 5; c++) if (row.charCodeAt(c) === 35) ctx.fillRect(gx + c * scale, y + r * scale, scale, scale);
+    }
+  }
+}
+
+// opts: scale, align ('left'|'center'|'right'), shadow (boja), shadowOff, outline (boja)
+function drawText(ctx, str, x, y, color, opts = {}) {
+  const scale = opts.scale || 1;
+  str = String(str).toUpperCase();
+  const w = textWidth(str, scale);
+  if (opts.align === 'center') x -= Math.floor(w / 2); else if (opts.align === 'right') x -= w;
+  x = Math.round(x); y = Math.round(y);
+  if (opts.shadow) { const o = opts.shadowOff || 1; drawGlyphs(ctx, str, x + o, y + o, opts.shadow, scale); }
+  if (opts.outline) {
+    for (const [ox, oy] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]) drawGlyphs(ctx, str, x + ox, y + oy, opts.outline, scale);
+  }
+  drawGlyphs(ctx, str, x, y, color, scale);
+  return w;
+}
+
+/* =====================================================================
+   PixelGrid – mreža piksela iz koje se grade sprite-ovi (+ automatski obrub)
+   ===================================================================== */
+class PixelGrid {
+  constructor(w, h) { this.w = w; this.h = h; this.px = new Array(w * h).fill(null); }
+  set(x, y, c) { if (x >= 0 && y >= 0 && x < this.w && y < this.h) this.px[y * this.w + x] = c; }
+  get(x, y) { return (x >= 0 && y >= 0 && x < this.w && y < this.h) ? this.px[y * this.w + x] : null; }
+  rect(x, y, w, h, c) { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) this.set(x + i, y + j, c); }
+  // tamni obrub oko svih ispunjenih piksela (kao u Terrariji)
+  outline(col) {
+    const add = [];
+    for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++) {
+      if (this.get(x, y)) continue;
+      if (this.get(x - 1, y) || this.get(x + 1, y) || this.get(x, y - 1) || this.get(x, y + 1)) add.push([x, y]);
+    }
+    for (const [x, y] of add) this.set(x, y, col);
+    return this;
+  }
+  toCanvas() {
+    const c = makeCanvas(this.w, this.h), g = c.getContext('2d');
+    for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++) {
+      const col = this.px[y * this.w + x];
+      if (col) { g.fillStyle = col; g.fillRect(x, y, 1, 1); }
+    }
+    return c;
+  }
+}
+
+function flipCanvas(src) {
+  const c = makeCanvas(src.width, src.height), g = c.getContext('2d');
+  g.translate(src.width, 0); g.scale(-1, 1); g.drawImage(src, 0, 0);
+  return c;
+}
+function tintCanvas(src, color) {
+  const c = makeCanvas(src.width, src.height), g = c.getContext('2d');
+  g.drawImage(src, 0, 0); g.globalCompositeOperation = 'source-in';
+  g.fillStyle = color; g.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+function fromStrings(rows, pal) {
+  const g = new PixelGrid(rows[0].length, rows.length);
+  rows.forEach((row, y) => [...row].forEach((ch, x) => { if (pal[ch]) g.set(x, y, pal[ch]); }));
+  return g;
+}
+
+// Okrugli predmet sjenčan u 3-4 nijanse (kamen, meteor, bomba, gromada)
+function makeBallGrid(r, pal, seed, opts = {}) {
+  const R = seeded(seed);
+  const size = Math.ceil(r) * 2 + 2, padTop = opts.padTop || 0;
+  const g = new PixelGrid(size, size + padTop);
+  const c = (size - 1) / 2, cy = c + padTop;
+  const lx = opts.lx ?? -0.6, ly = opts.ly ?? -0.75, rough = opts.rough ?? 0.6;
+  for (let y = 0; y < g.h; y++) for (let x = 0; x < size; x++) {
+    const dx = x - c, dy = y - cy, d = Math.sqrt(dx * dx + dy * dy);
+    if (d > r - 0.3 + (R() - 0.5) * rough) continue;
+    let n = (dx * lx + dy * ly) / r + (R() - 0.5) * 0.5 - Math.pow(d / r, 3) * 0.3;
+    g.set(x, y, n > 0.55 ? pal[3] : n > 0.05 ? pal[2] : n > -0.45 ? pal[1] : pal[0]);
+  }
+  return g;
+}
+
+// Mekani sjaj (stepenasti krugovi) – crta se s 'lighter'
+function makeGlow(r, rgb) {
+  const s = r * 2 + 1, c = makeCanvas(s, s), g = c.getContext('2d');
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    const d = Math.hypot(x - r, y - r) / r;
+    if (d >= 1) continue;
+    const a = 0.45 * (1 - Math.floor(d * 4) / 4);
+    g.fillStyle = `rgba(${rgb},${a})`; g.fillRect(x, y, 1, 1);
+  }
+  return c;
+}
+
+/* =====================================================================
+   Sprite-ovi (sve nacrtano kodom)
+   ===================================================================== */
+const SPR = {};
+
+// --- Igrač: 4 framea hodanja, stajanje, skok, pad ---
+const PLAYER_PAL = {
+  hair: '#5a3220', hairL: '#83502e', skin: '#f0b98d', skinD: '#c98863', eye: '#20161e', eyeW: '#ffffff',
+  shirt: '#3e8e5a', shirtD: '#2a6440', shirtL: '#62bb7b', sleeve: '#347a4c', sleeveD: '#245638',
+  belt: '#4a2e1a', pants: '#3d4f96', pantsD: '#2a376e', boot: '#6b4529', bootD: '#462c18', outline: '#1a1020',
+};
+// b/f = [kuk, stopalo, podizanje] za stražnju/prednju nogu, af/ab = položaj šake
+const POSES = {
+  idle:  { b: [2, 2, 0], f: [5, 5, 0], af: [4, 10], ab: null },
+  walk0: { b: [2, 0, 0], f: [5, 7, 0], af: [2, 10], ab: [6, 10] },
+  walk1: { b: [2, 3, 1], f: [5, 4, 0], af: [4, 10], ab: null },
+  walk2: { b: [2, 6, 0], f: [5, 1, 0], af: [6, 10], ab: [2, 10] },
+  walk3: { b: [2, 3, 0], f: [5, 4, 1], af: [4, 10], ab: null },
+  jump:  { b: [2, 1, 0], f: [5, 7, 2], af: [7, 5],  ab: [1, 8] },
+  fall:  { b: [2, 1, 1], f: [5, 7, 0], af: [7, 4],  ab: [1, 4] },
+};
+
+function buildPlayerFrame(pose) {
+  const C = PLAYER_PAL, g = new PixelGrid(12, 18);
+  const P = (x, y, c) => g.set(x + 1, y + 1, c);
+  const leg = (hip, foot, lift, pants, boot) => {
+    const top = 11, bottom = 15 - lift, n = bottom - top;
+    for (let r = top; r <= bottom; r++) {
+      const x = Math.round(hip + (foot - hip) * (n > 0 ? (r - top) / n : 0));
+      const col = r >= bottom - 1 ? boot : pants;
+      P(x, r, col); P(x + 1, r, col);
+      if (r === bottom) P(x + 2, r, boot);
+    }
+  };
+  const arm = (hx, hy, sleeve, skin) => {
+    const sx = 4, sy = 7, steps = Math.max(Math.abs(hx - sx), Math.abs(hy - sy));
+    for (let i = 0; i < steps; i++) P(Math.round(sx + (hx - sx) * i / steps), Math.round(sy + (hy - sy) * i / steps), sleeve);
+    P(hx, hy, skin);
+  };
+  if (pose.ab) arm(pose.ab[0], pose.ab[1], C.sleeveD, C.skinD);
+  leg(pose.b[0], pose.b[1], pose.b[2], C.pantsD, C.bootD);
+  // trup
+  for (let y = 6; y <= 9; y++) for (let x = 2; x <= 6; x++) P(x, y, x === 2 ? C.shirtD : (x === 6 && y < 9) ? C.shirtL : C.shirt);
+  for (let x = 2; x <= 6; x++) { P(x, 10, C.belt); P(x, 11, C.pants); }
+  // glava
+  for (let x = 2; x <= 6; x++) P(x, 0, (x === 3 || x === 4) ? C.hairL : C.hair);
+  for (let x = 1; x <= 7; x++) P(x, 1, (x >= 2 && x <= 4) ? C.hairL : C.hair);
+  for (let x = 1; x <= 7; x++) P(x, 2, x <= 3 ? C.hair : C.skin);
+  for (let x = 1; x <= 7; x++) P(x, 3, x <= 2 ? C.hair : C.skin);
+  P(5, 3, C.eyeW); P(6, 3, C.eye);
+  for (let x = 1; x <= 7; x++) P(x, 4, x === 1 ? C.hair : C.skin);
+  for (let x = 2; x <= 6; x++) P(x, 5, x === 2 ? C.skinD : C.skin);
+  leg(pose.f[0], pose.f[1], pose.f[2], C.pants, C.boot);
+  arm(pose.af[0], pose.af[1], C.sleeve, C.skin);
+  return g.outline(C.outline).toCanvas();
+}
+
+function buildAnvil() {
+  const g = new PixelGrid(18, 11), L = '#b9c2d6', M = '#7f89a3', D = '#535b72', DD = '#363c4e';
+  const P = (x, y, c) => g.set(x + 1, y + 1, c);
+  for (let x = 0; x < 16; x++) P(x, 0, L);
+  for (let x = 0; x < 16; x++) P(x, 1, x < 2 ? D : M);
+  for (let x = 2; x < 16; x++) P(x, 2, x < 4 ? D : M);
+  for (let x = 4; x < 16; x++) P(x, 3, D);
+  for (let y = 4; y < 6; y++) for (let x = 6; x < 13; x++) P(x, y, x === 6 ? DD : M);
+  for (let x = 4; x < 15; x++) P(x, 6, M);
+  for (let x = 3; x < 16; x++) P(x, 7, x === 3 ? D : M);
+  for (let x = 3; x < 16; x++) P(x, 8, DD);
+  return g.outline('#12131a').toCanvas();
+}
+
+function buildSprites() {
+  SPR.player = {}; SPR.playerWhite = {};
+  for (const k in POSES) {
+    const c = buildPlayerFrame(POSES[k]);
+    SPR.player[k] = [c, flipCanvas(c)];
+    const w = tintCanvas(c, '#ffffff');
+    SPR.playerWhite[k] = [w, flipCanvas(w)];
+  }
+  const rockPal = ['#3f3a46', '#5d5866', '#7f7a88', '#a7a2b0'];
+  SPR.rock = [11, 23, 37].map(s => makeBallGrid(4.5, rockPal, s, { rough: 0.9 }).outline('#1f1a24').toCanvas());
+  SPR.meteor = [makeBallGrid(4, ['#7a1e0e', '#c8401a', '#ff8a2a', '#ffe080'], 5, { lx: 0.2, ly: 0.9, rough: 0.5 }).outline('#3a0e06').toCanvas()];
+  SPR.boulder = [makeBallGrid(8, ['#3a2c26', '#5a463c', '#7a6252', '#9c8470'], 9, { rough: 1.1 }).outline('#1c1410').toCanvas()];
+  const bomb = makeBallGrid(4.5, ['#1c1d28', '#2c2e3e', '#454a62', '#8890b0'], 3, { rough: 0, padTop: 2 });
+  bomb.rect(5, 2, 2, 2, '#6b7086'); bomb.set(5, 2, '#8a90a8');
+  SPR.bomb = [bomb.outline('#0c0c12').toCanvas()];
+  SPR.anvil = [buildAnvil()];
+  SPR.bombRed = tintCanvas(SPR.bomb[0], '#ff3030');
+
+  const heart = ['.rr.rr.', 'rwrrrrr', 'rrrrrrd', '.rrrrd.', '..rrd..', '...d...'];
+  SPR.heartFull = fromStrings(heart, { r: '#e8303a', w: '#ffb0b0', d: '#a01828' }).toCanvas();
+  SPR.heartEmpty = fromStrings(heart, { r: '#3a3448', w: '#4e4860', d: '#2a2536' }).toCanvas();
+  // obrub srca (crtamo u većoj mreži)
+  for (const k of ['heartFull', 'heartEmpty']) {
+    const src = SPR[k], g = new PixelGrid(9, 8), cx = src.getContext('2d'), d = cx.getImageData(0, 0, 7, 6).data;
+    for (let y = 0; y < 6; y++) for (let x = 0; x < 7; x++) {
+      const i = (y * 7 + x) * 4;
+      if (d[i + 3]) g.set(x + 1, y + 1, `rgb(${d[i]},${d[i + 1]},${d[i + 2]})`);
+    }
+    SPR[k] = g.outline('#14080c').toCanvas();
+  }
+  SPR.glowOrange = makeGlow(9, '255,140,40');
+  SPR.glowSmall = makeGlow(5, '255,200,80');
+}
+
+/* =====================================================================
+   Platforma (tileovi zemlje, trave i kamena) i pozadinski slojevi
+   ===================================================================== */
+const PLAT_PAD = 4; // prostor iznad platforme za travu/cvijeće
+const MOON = { x: 34, y: 62 };
+function buildPlatform() {
+  const Wp = PW, Hp = 40, R = seeded(1234);
+  const noise = makeValueNoise(Wp, Hp, 4, seeded(99));
+  const noise2 = makeValueNoise(Wp, Hp, 3, seeded(7));
+  const g = new PixelGrid(Wp + 2, Hp + PLAT_PAD + 1);
+  const GL = '#7ad04a', GM = '#4fa83a', GD = '#357a2a';
+  const DL = '#a66d3d', DM = '#8b5a33', DD = '#6b4226';
+  const SL = '#9a9aa8', SM = '#74747f', SD = '#55555f';
+  const grassDepth = []; for (let x = 0; x < Wp; x++) grassDepth.push(2 + (R() < 0.5 ? 1 : 0) + (R() < 0.2 ? 1 : 0));
+  const jag = []; for (let y = 0; y < Hp; y++) jag.push(R() < 0.4 ? 1 : 0);
+  for (let y = 0; y < Hp; y++) {
+    const inset = y < 16 ? 0 : Math.floor((y - 16) * 0.85) + jag[y];
+    for (let x = 0; x < Wp; x++) {
+      if (x < inset || x >= Wp - inset) continue;
+      if (y === 0 && (x === 0 || x === Wp - 1)) continue; // zaobljeni kutovi
+      let col;
+      const r = R(), n = noise(x, y);
+      if (y < grassDepth[x]) col = y === 0 ? GL : (r < 0.25 ? GL : GM);
+      else if (y === grassDepth[x] && r < 0.6) col = GD;
+      else if (n < (y - 14) / 14) { // kamen u dubini
+        const m = noise2(x, y) + (R() - 0.5) * 0.25;
+        col = m > 0.62 ? SL : m < 0.35 ? SD : SM;
+      } else {
+        col = r < 0.12 ? DD : r > 0.93 ? DL : (n > 0.62 ? DL : n < 0.3 ? DD : DM);
+        if (R() < 0.015) col = '#8f8a85';
+      }
+      g.set(x + 1, y + PLAT_PAD, col);
+    }
+  }
+  g.outline('#24160e');
+  // trava i cvijeće na vrhu
+  for (let x = 2; x < Wp - 2; x += randi(2, 5)) {
+    const h = R() < 0.3 ? 2 : 1;
+    for (let i = 0; i < h; i++) g.set(x + 1, PLAT_PAD - 1 - i, i === h - 1 ? GL : GM);
+    if (R() < 0.12) { g.set(x + 1, PLAT_PAD - 1, GM); g.set(x + 1, PLAT_PAD - 2, GM); g.set(x + 1, PLAT_PAD - 3, pick(['#ff5a8a', '#ffd84a', '#8ad8ff', '#ffffff'])); }
+  }
+  const c = g.toCanvas(), cx = c.getContext('2d');
+  // stepenasti narančasti sjaj lave na dnu platforme
+  cx.globalCompositeOperation = 'source-atop';
+  for (let y = PLAT_PAD + 14, i = 0; y < c.height; y += 3, i++) {
+    cx.fillStyle = `rgba(255,90,20,${Math.min(0.55, i * 0.06)})`;
+    cx.fillRect(0, y, c.width, 3);
+  }
+  return c;
+}
+
+function buildSky() {
+  const c = makeCanvas(W, H), g = c.getContext('2d');
+  const cols = ['#06031a', '#0a0520', '#0f0726', '#15092c', '#1c0b31', '#260d35', '#321036', '#401335', '#511733', '#621b30'];
+  const bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  for (let y = 0; y < H; y++) {
+    const t = Math.min(1, y / (CONFIG.lavaY - 4)) * (cols.length - 1);
+    const b = Math.floor(t), f = t - b;
+    g.fillStyle = cols[b]; g.fillRect(0, y, W, 1);
+    if (b + 1 < cols.length) {
+      g.fillStyle = cols[b + 1];
+      for (let x = 0; x < W; x++) if (f > (bayer[y & 3][x & 3] + 0.5) / 16) g.fillRect(x, y, 1, 1);
+    }
+  }
+  // mjesec
+  const mx = MOON.x, my = MOON.y, mr = 11, R = seeded(4);
+  for (let y = -mr - 4; y <= mr + 4; y++) for (let x = -mr - 4; x <= mr + 4; x++) {
+    const d = Math.sqrt(x * x + y * y);
+    if (d <= mr) {
+      let col = '#eadbc0';
+      if (x * 0.6 + y * 0.4 > mr * 0.45) col = '#c9b593';
+      g.fillStyle = col; g.fillRect(mx + x, my + y, 1, 1);
+    } else if (d <= mr + 3 && ((x + y) & 1) === 0) {
+      g.fillStyle = '#2a1a3c'; g.fillRect(mx + x, my + y, 1, 1);
+    }
+  }
+  for (let i = 0; i < 6; i++) {
+    const cx = mx + Math.round((R() - 0.5) * 12), cy = my + Math.round((R() - 0.5) * 12), s = R() < 0.5 ? 1 : 2;
+    g.fillStyle = '#bfa987'; g.fillRect(cx, cy, s + 1, s);
+  }
+  return c;
+}
+
+function buildFar() {
+  const w = 360, c = makeCanvas(w, H), g = c.getContext('2d');
+  for (let i = 0; i < w; i++) {
+    const r = Math.round(96 + 13 * Math.sin(i * 0.017 + 0.5) + 8 * Math.sin(i * 0.043 + 1.7) + 3 * Math.sin(i * 0.12 + 0.3));
+    g.fillStyle = '#3b2148'; g.fillRect(i, r, 1, 1);
+    g.fillStyle = '#20122c'; g.fillRect(i, r + 1, 1, H - r);
+    g.fillStyle = '#2a1534';
+    for (let y = 132; y < H; y++) if (y > r && ((i + y) & 1) === 0) g.fillRect(i, y, 1, 1);
+  }
+  return c;
+}
+
+function buildNear() {
+  const w = 360, c = makeCanvas(w, H), g = c.getContext('2d'), R = seeded(77);
+  const vx = 300, top = 74, ridge = [];
+  for (let i = 0; i < w; i++) {
+    let r = 132 + 8 * Math.sin(i * 0.031 + 2) + 5 * Math.sin(i * 0.083 + 0.4) + 2 * Math.sin(i * 0.21);
+    r = Math.min(r, top + Math.abs(i - vx) * 0.85);
+    if (Math.abs(i - vx) < 5) r = top + 4;
+    ridge[i] = Math.round(r);
+    g.fillStyle = '#170c1d'; g.fillRect(i, ridge[i], 1, H - ridge[i]);
+    g.fillStyle = '#5a1d2a'; g.fillRect(i, ridge[i], 1, 1);
+    g.fillStyle = '#2c1123'; g.fillRect(i, ridge[i] + 1, 1, 1);
+  }
+  // lava u krateru i potoci lave niz vulkan
+  g.fillStyle = '#ff8a2a'; g.fillRect(vx - 4, top + 4, 9, 1);
+  g.fillStyle = '#ffd040'; g.fillRect(vx - 2, top + 4, 5, 1);
+  for (const s of [-1, 1]) {
+    let sx = vx + s * 3;
+    for (let y = top + 5; y < 150; y++) {
+      sx += s * (0.55 + 0.35 * Math.sin(y * 0.3 + s));
+      const ix = Math.round(sx);
+      if (ix < 0 || ix >= w || y <= ridge[ix] + 1) continue;
+      g.fillStyle = R() < 0.3 ? '#ff8a2a' : '#c8461c'; g.fillRect(ix, y, 1, 1);
+    }
+  }
+  return { canvas: c, craterX: vx, craterY: top + 3 };
+}
+
+/* =====================================================================
+   Input
+   ===================================================================== */
+const GAME_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'KeyA', 'KeyD', 'KeyW', 'KeyP', 'KeyR']);
+const Input = {
+  keys: {}, touch: {}, pressed: {},   // touch = tipke na ekranu (mobitel)
+  isDown(...codes) { return codes.some(c => this.keys[c] || this.touch[c]); },
+  wasPressed(...codes) { return codes.some(c => this.pressed[c]); },
+  endFrame() { this.pressed = {}; },
+};
+window.addEventListener('keydown', e => {
+  if (GAME_KEYS.has(e.code)) e.preventDefault();
+  if (!Input.keys[e.code]) Input.pressed[e.code] = true;
+  Input.keys[e.code] = true;
+});
+window.addEventListener('keyup', e => { Input.keys[e.code] = false; });
+
+/* =====================================================================
+   Particle – čestice (krhotine, iskre, dim, kapljice lave...)
+   ===================================================================== */
+class Particle {
+  constructor(o) {
+    Object.assign(this, { vx: 0, vy: 0, grav: 0, drag: 0, size: 1, floor: false, noLava: false, shrink: false, life: 1 }, o);
+    this.max = this.life;
+  }
+  update(dt) {
+    this.life -= dt;
+    this.vy += this.grav * dt;
+    if (this.drag) { const d = Math.max(0, 1 - this.drag * dt); this.vx *= d; this.vy *= d; }
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    // krhotine odskakuju od platforme
+    if (this.floor && this.vy > 0 && this.y >= PLATFORM.top - 1 && this.y < PLATFORM.top + 4 && this.x >= PLATFORM.left && this.x < PLATFORM.right) {
+      this.y = PLATFORM.top - 1; this.vy *= -0.3; this.vx *= 0.6;
+    }
+    if (!this.noLava && this.y > CONFIG.lavaY + 2) this.life = 0;
+    return this.life > 0;
+  }
+  draw(ctx) {
+    const k = 1 - this.life / this.max, cols = this.colors;
+    ctx.fillStyle = cols[Math.min(cols.length - 1, Math.floor(k * cols.length))];
+    const s = this.shrink ? Math.max(1, Math.round(this.size * (1 - k))) : this.size;
+    ctx.fillRect(Math.round(this.x - s / 2), Math.round(this.y - s / 2), s, s);
+  }
+}
+
+// Kratki efekt eksplozije bombe
+class Explosion {
+  constructor(x, y, r) { this.x = x; this.y = y; this.r = r; this.t = 0; this.d = 0.35; }
+  update(dt) { this.t += dt; return this.t < this.d; }
+  draw(ctx) {
+    const k = this.t / this.d, R = Math.round(this.r * (0.45 + 0.55 * Math.min(1, k * 3)));
+    const cols = k < 0.25 ? ['#ffffff', '#fff3a0'] : k < 0.6 ? ['#ffd23f', '#ff8a2a'] : ['#ff5a1f', '#8a2a14'];
+    pixelCircle(ctx, this.x, this.y, R, cols[1]);
+    pixelCircle(ctx, this.x, this.y, Math.round(R * 0.6), cols[0]);
+  }
+}
+
+/* =====================================================================
+   Player – kretanje, skok, fizika, animacije
+   ===================================================================== */
+class Player {
+  constructor() {
+    this.w = 6; this.h = 15;
+    this.x = W / 2 - this.w / 2; this.y = PLATFORM.top - this.h;
+    this.vx = 0; this.vy = 0; this.onGround = true; this.facing = 1;
+    this.lives = CONFIG.player.lives; this.invuln = 0; this.hitFlash = 0;
+    this.jumpBuffer = 0; this.jumping = false; this.animT = 0;
+    this.dead = false; this.inLava = false;
+  }
+  get cx() { return this.x + this.w / 2; }
+  // hurtbox je manji od spritea – fer igra
+  hurtbox() { return { x: this.x + 1, y: this.y + 3, w: this.w - 2, h: this.h - 4 }; }
+
+  update(dt, inp) {
+    const P = CONFIG.player;
+    if (this.invuln > 0) this.invuln -= dt;
+    if (this.hitFlash > 0) this.hitFlash -= dt;
+    if (this.jumpBuffer > 0) this.jumpBuffer -= dt;
+    this.animT += dt;
+
+    const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    if (dir) this.facing = dir;
+    const accel = this.onGround ? P.groundAccel : P.airAccel;
+    const decel = this.onGround ? P.groundDecel : P.airDecel;
+    if (dir !== 0) {
+      if (Math.sign(this.vx) === -dir) this.vx += dir * decel * dt; // brže okretanje
+      this.vx += dir * accel * dt;
+      this.vx = clamp(this.vx, -P.maxSpeed, P.maxSpeed);
+    } else if (this.vx !== 0) {
+      const s = Math.sign(this.vx);
+      this.vx -= s * decel * dt;
+      if (Math.sign(this.vx) !== s) this.vx = 0;
+    }
+
+    // skok – samo s tla; ako se drži smjer, skok ide u tom smjeru
+    if (this.jumpBuffer > 0 && this.onGround) {
+      this.vy = -P.jumpVelocity; this.onGround = false; this.jumping = true; this.jumpBuffer = 0;
+      if (dir !== 0) this.vx = dir * Math.max(Math.sign(this.vx) === dir ? Math.abs(this.vx) : 0, P.jumpSideSpeed);
+      game.dust(this.cx, PLATFORM.top - 1, 4);
+    }
+    if (this.jumping && !inp.jumpHeld && this.vy < 0) { this.vy *= P.jumpCut; this.jumping = false; }
+    if (this.vy >= 0) this.jumping = false;
+    this.vy = Math.min(this.vy + P.gravity * dt, P.maxFallSpeed);
+
+    // horizontalno + rubovi ekrana
+    this.x += this.vx * dt;
+    if (this.x < 0) { this.x = 0; this.vx = 0; }
+    if (this.x > W - this.w) { this.x = W - this.w; this.vx = 0; }
+    // bočni zidovi gornjeg sloja platforme (kad je igrač ispod ruba)
+    if (this.y + this.h > PLATFORM.top + 1 && this.y < PLATFORM.top + 16 && this.x + this.w > PLATFORM.left && this.x < PLATFORM.right) {
+      this.x = this.cx < (PLATFORM.left + PLATFORM.right) / 2 ? PLATFORM.left - this.w : PLATFORM.right;
+      this.vx = 0;
+    }
+
+    // vertikalno + doskok na platformu
+    const wasGround = this.onGround, prevBottom = this.y + this.h;
+    this.y += this.vy * dt;
+    const over = this.cx >= PLATFORM.left && this.cx <= PLATFORM.right;
+    this.onGround = false;
+    if (over && this.vy >= 0 && prevBottom <= PLATFORM.top + 0.5 && this.y + this.h >= PLATFORM.top) {
+      if (!wasGround && this.vy > 120) game.dust(this.cx, PLATFORM.top - 1, 5);
+      this.y = PLATFORM.top - this.h; this.vy = 0; this.onGround = true;
+    }
+  }
+
+  // nakon smrti: pada kroz platformu / tone u lavu
+  updateDead(dt) {
+    this.animT += dt;
+    if (this.inLava) { this.y += 10 * dt; return; }
+    this.vy = Math.min(this.vy + CONFIG.player.gravity * dt, CONFIG.player.maxFallSpeed);
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    if (this.y + this.h > CONFIG.lavaY + 4) { this.inLava = true; game.splash(this.cx, 16); }
+  }
+
+  draw(ctx) {
+    if (!this.dead && this.invuln > 0 && this.hitFlash <= 0 && Math.floor(this.invuln * 14) % 2 === 0) return; // treptanje
+    let key;
+    if (this.dead) key = 'fall';
+    else if (!this.onGround) key = this.vy < 0 ? 'jump' : 'fall';
+    else if (Math.abs(this.vx) > 6) key = 'walk' + (Math.floor(this.animT * (4 + Math.abs(this.vx) / 9)) % 4);
+    else key = 'idle';
+    const set = this.hitFlash > 0 ? SPR.playerWhite : SPR.player;
+    const right = this.facing > 0;
+    ctx.drawImage(set[key][right ? 0 : 1], Math.round(this.cx - (right ? 5.5 : 6.5)), Math.round(this.y + this.h - 17));
+  }
+}
+
+/* =====================================================================
+   FallingObject – predmeti koji padaju (ravno, koso ili po sinusoidi)
+   ===================================================================== */
+const DEBRIS = {
+  rock: ['#a7a2b0', '#7f7a88', '#5d5866'], meteor: ['#fff3a0', '#ffb52e', '#ff6a1f', '#8a2a14'],
+  anvil: ['#b9c2d6', '#7f89a3', '#535b72'], bomb: ['#454a62', '#2c2e3e'], boulder: ['#9c8470', '#7a6252', '#5a463c'],
+};
+const FIRE = ['#fff3a0', '#ffd23f', '#ff8a2a', '#d4421a', '#6a2a20'];
+
+class FallingObject {
+  constructor(type, x, p) {
+    this.type = type; this.def = CONFIG.objects[type];
+    this.sprite = pick(SPR[type]);
+    this.w = this.sprite.width; this.h = this.sprite.height;
+    this.x = clamp(x, this.w / 2 + 2, W - this.w / 2 - 2); this.baseX = this.x;
+    this.vy = p.fallSpeed * this.def.speedMul * rand(0.9, 1.1);
+    this.y = -this.h - this.vy * 0.6; // ~0.6 s upozorenja na vrhu ekrana
+    this.t = 0; this.rot = 0; this.rotT = 0; this.state = 'fall'; this.fuse = 0; this.dead = false; this.fxAcc = 0;
+    this.motion = 'straight';
+    if (Math.random() < p.swayChance) {
+      const m = this.def.swayMul;
+      if (Math.random() < 0.5) {
+        this.motion = 'sine'; this.amp = p.swayAmp * m * rand(0.6, 1); this.freq = p.swayFreq * rand(0.8, 1.2); this.phase = rand(0, Math.PI * 2);
+      } else {
+        this.motion = 'diag'; this.vx = p.diagSpeed * m * rand(0.6, 1) * (Math.random() < 0.5 ? -1 : 1);
+      }
+    }
+  }
+  hitbox() {
+    const s = this.def.hitShrink, ix = Math.round(this.w * s), iy = Math.round(this.h * s);
+    return { x: this.x - this.w / 2 + ix, y: this.y + iy, w: this.w - 2 * ix, h: this.h - 2 * iy };
+  }
+  update(dt, game) {
+    this.t += dt;
+    if (this.state === 'armed') { this.fxAcc += dt * 25; this.emitFuse(game); return; }
+    this.y += this.vy * dt;
+    if (this.motion === 'sine') {
+      this.x = this.baseX + this.amp * (Math.sin(this.t * this.freq * Math.PI * 2 + this.phase) - Math.sin(this.phase));
+    } else if (this.motion === 'diag') {
+      this.x += this.vx * dt;
+      if (this.x < this.w / 2 || this.x > W - this.w / 2) { this.vx = -this.vx; this.x = clamp(this.x, this.w / 2, W - this.w / 2); }
+    }
+    // kotrljanje kamenja (rotacija po 90° ostaje oštra)
+    if (this.type === 'rock' || this.type === 'boulder') {
+      this.rotT += dt;
+      if (this.rotT > (this.type === 'rock' ? 0.12 : 0.2)) { this.rotT = 0; this.rot = (this.rot + 1) % 4; }
+    }
+    if (this.type === 'meteor' && this.y > -this.h) {
+      this.fxAcc += dt * 60;
+      while (this.fxAcc >= 1) {
+        this.fxAcc--;
+        game.particles.push(new Particle({ x: this.x + rand(-3, 3), y: this.y + rand(1, 5), vx: rand(-8, 8), vy: this.vy * 0.15, grav: -40,
+          life: rand(0.25, 0.45), colors: FIRE, size: 2, shrink: true }));
+      }
+    }
+    if (this.type === 'bomb') { this.fxAcc += dt * 12; this.emitFuse(game); }
+  }
+  emitFuse(game) {
+    while (this.fxAcc >= 1) {
+      this.fxAcc--;
+      game.particles.push(new Particle({ x: this.x + 3, y: this.y, vx: rand(-25, 25), vy: rand(-40, -10), grav: 60,
+        life: rand(0.15, 0.3), colors: ['#ffffff', '#ffe887', '#ff8a2a'] }));
+    }
+  }
+  draw(ctx, time) {
+    const dx = Math.round(this.x - this.w / 2), dy = Math.round(this.y);
+    if (this.type === 'meteor') {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(SPR.glowOrange, Math.round(this.x) - 9, dy + this.h / 2 - 9);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    if (this.rot) {
+      ctx.save(); ctx.translate(dx + this.w / 2, dy + this.h / 2); ctx.rotate(this.rot * Math.PI / 2);
+      ctx.drawImage(this.sprite, -this.w / 2, -this.h / 2); ctx.restore();
+    } else ctx.drawImage(this.sprite, dx, dy);
+    if (this.type === 'bomb') {
+      // fitilj + iskra
+      ctx.fillStyle = '#8a5a30'; ctx.fillRect(dx + 7, dy + 1, 1, 1); ctx.fillRect(dx + 8, dy, 1, 1);
+      ctx.fillStyle = Math.floor(time * 20) % 2 ? '#ffffff' : '#ffd040'; ctx.fillRect(dx + 9, dy - 1, 1, 1);
+      if (this.state === 'armed') {
+        const rate = 6 + (1 - this.fuse / this.def.fuseTime) * 18;
+        if (Math.floor(time * rate) % 2 === 0) { ctx.globalAlpha = 0.75; ctx.drawImage(SPR.bombRed, dx, dy); ctx.globalAlpha = 1; }
+        // upozorenje: radijus eksplozije
+        const R = this.def.blastRadius, cy = dy + this.h / 2;
+        if (Math.floor(time * rate) % 2 === 0) {
+          ctx.fillStyle = 'rgba(255,60,40,0.7)';
+          for (let a = 0; a < 40; a++) {
+            const ang = Math.PI + (a / 39) * Math.PI;
+            ctx.fillRect(Math.round(this.x + Math.cos(ang) * R), Math.round(cy + Math.sin(ang) * R), 1, 1);
+          }
+        }
+      }
+    }
+  }
+}
+
+/* =====================================================================
+   WaveManager – valovi, natpisi, težina i spawn predmeta
+   ===================================================================== */
+class WaveManager {
+  constructor(game) { this.game = game; this.wave = 0; this.phase = 'idle'; this.timer = 0; this.timeLeft = 0; this.spawnTimer = 0; this.lastBonus = 0; }
+  start() { this.wave = 1; this.lastBonus = 0; this.beginBanner(); }
+  beginBanner() { this.phase = 'banner'; this.timer = 0; this.timeLeft = this.duration(this.wave); }
+  duration(w) { return CONFIG.waves.firstWaveDuration + CONFIG.waves.durationIncrease * (w - 1); }
+
+  // sve vrijednosti težine za zadani val
+  params(w) {
+    const C = CONFIG.waves, n = w - 1, s = w - C.swayStartWave;
+    return {
+      fallSpeed: Math.min(C.fallSpeedMax, C.fallSpeedBase + C.fallSpeedPerWave * n),
+      interval: Math.max(C.spawnIntervalMin, C.spawnIntervalBase - C.spawnIntervalPerWave * n),
+      swayChance: s < 0 ? 0 : Math.min(C.swayChanceMax, C.swayChanceBase + C.swayChancePerWave * s),
+      swayAmp: Math.min(C.swayAmpMax, C.swayAmpBase + C.swayAmpPerWave * Math.max(0, s)),
+      swayFreq: C.swayFreqBase + C.swayFreqPerWave * Math.max(0, s),
+      diagSpeed: Math.min(C.diagSpeedMax, C.diagSpeedBase + C.diagSpeedPerWave * Math.max(0, s)),
+    };
+  }
+  pickType(w) {
+    const types = Object.entries(CONFIG.objects).filter(([, d]) => d.minWave <= w);
+    let total = types.reduce((s, [, d]) => s + d.weight, 0), r = Math.random() * total;
+    for (const [k, d] of types) { r -= d.weight; if (r <= 0) return k; }
+    return types[0][0];
+  }
+  newTypes(w) { return Object.entries(CONFIG.objects).filter(([, d]) => d.minWave === w && w > 1).map(([k]) => k); }
+
+  update(dt) {
+    const C = CONFIG.waves;
+    if (this.phase === 'banner') {
+      this.timer += dt;
+      if (this.timer >= C.bannerTime) { this.phase = 'active'; this.spawnTimer = 0.3; }
+    } else if (this.phase === 'active') {
+      this.timeLeft -= dt;
+      this.spawnTimer -= dt;
+      while (this.spawnTimer <= 0) {
+        this.spawn();
+        this.spawnTimer += this.params(this.wave).interval * rand(1 - C.spawnJitter, 1 + C.spawnJitter);
+      }
+      if (this.timeLeft <= 0) {
+        this.timeLeft = 0;
+        this.lastBonus = this.game.onWaveCleared(this.wave);
+        this.wave++;
+        this.beginBanner();
+      }
+    }
+  }
+  spawn() {
+    const C = CONFIG.waves, p = this.params(this.wave), pl = this.game.player;
+    const count = (this.wave >= C.extraSpawnFromWave && Math.random() < (this.wave - C.extraSpawnFromWave + 1) * C.extraSpawnPerWave) ? 2 : 1;
+    for (let i = 0; i < count; i++) {
+      const x = Math.random() < C.targetPlayerChance ? pl.cx + rand(-20, 20) : rand(PLATFORM.left - 30, PLATFORM.right + 30);
+      this.game.objects.push(new FallingObject(this.pickType(this.wave), x, p));
+    }
+  }
+}
+
+/* =====================================================================
+   Game – stanja igre, logika, kolizije, bodovi
+   ===================================================================== */
+class Game {
+  constructor() {
+    this.state = 'title';       // title | playing | paused | dying | gameover
+    this.isTouch = false;       // true na mobitelu/tabletu (drugi tekstovi + tipke na ekranu)
+    this.wantFullscreen = false;
+    this.overAt = 0;
+    this.savedHigh = loadHigh();
+    this.time = 0; this.uiTime = 0;
+    // ambijent (lava, žeravica, dim vulkana)
+    this.bubbles = []; this.bubbleAcc = 0; this.emberAcc = 0; this.smoke = []; this.smokeAcc = 0;
+    const Rc = seeded(5);
+    this.crusts = [];
+    for (let i = 0; i < 18; i++) this.crusts.push({ x: Rc() * (W + 40) - 20, y: Math.round(CONFIG.lavaY + 7 + Rc() * (H - CONFIG.lavaY - 9)),
+      w: 5 + Math.floor(Rc() * 12), sp: 1.5 + Rc() * 3, streak: Rc() < 0.35 });
+    this.reset();
+    this.demoT = 0.5;
+  }
+  reset() {
+    this.player = new Player();
+    this.objects = []; this.particles = []; this.effects = []; this.texts = [];
+    this.waves = new WaveManager(this);
+    this.score = 0; this.beatHigh = false; this.newHighTimer = 0; this.newRecord = false;
+    this.dyingT = 0; this.shakeT = 0; this.shakeMag = 0; this.heartFlash = 0;
+  }
+  start() { this.reset(); this.state = 'playing'; this.waves.start(); if (this.isTouch) this.wantFullscreen = true; }
+
+  handleInput() {
+    const jumpP = Input.wasPressed('Space', 'KeyW', 'ArrowUp');
+    const tap = Input.wasPressed('Tap'); // bilo koji novi dodir ekrana
+    switch (this.state) {
+      case 'title': if (Input.wasPressed('Space') || tap) this.start(); break;
+      case 'playing':
+        if (Input.wasPressed('KeyP')) { this.state = 'paused'; break; }
+        if (jumpP) this.player.jumpBuffer = CONFIG.player.jumpBuffer;
+        break;
+      case 'paused': if (Input.wasPressed('KeyP') || tap) this.state = 'playing'; break;
+      case 'gameover':
+        // kratka odgoda da slučajni dodir u trenutku smrti ne pokrene novu igru
+        if (Input.wasPressed('KeyR') || (tap && this.uiTime - this.overAt > 0.8)) this.start();
+        break;
+    }
+  }
+
+  update(dt) {
+    if (this.state === 'paused') return;
+    this.time += dt;
+    this.updateAmbient(dt);
+    const pl = this.player;
+    if (this.state === 'playing') {
+      this.score += CONFIG.scorePerSecond * dt;
+      this.waves.update(dt);
+      pl.update(dt, {
+        left: Input.isDown('ArrowLeft', 'KeyA'), right: Input.isDown('ArrowRight', 'KeyD'),
+        jumpHeld: Input.isDown('Space', 'KeyW', 'ArrowUp'),
+      });
+      if (pl.y + pl.h > CONFIG.lavaY + 3) this.killPlayer('lava');
+      // novi rekord tijekom igre
+      if (!this.beatHigh && Math.floor(this.score) > this.savedHigh) {
+        this.beatHigh = true;
+        if (this.savedHigh > 0) this.newHighTimer = 3;
+      }
+    } else if (this.state === 'title') {
+      pl.update(dt, {});
+      this.demoT -= dt;
+      if (this.demoT <= 0) {
+        this.demoT = rand(0.6, 1.2);
+        this.objects.push(new FallingObject(pick(['rock', 'rock', 'meteor']), rand(10, W - 10), this.waves.params(1)));
+      }
+    } else if (this.state === 'dying') {
+      pl.updateDead(dt);
+      this.dyingT -= dt;
+      if (this.dyingT <= 0) this.gameOver();
+    }
+    if (this.newHighTimer > 0) this.newHighTimer -= dt;
+    if (this.heartFlash > 0) this.heartFlash -= dt;
+    if (this.shakeT > 0) { this.shakeT -= dt; if (this.shakeT <= 0) this.shakeMag = 0; }
+
+    this.updateObjects(dt);
+    this.particles = this.particles.filter(p => p.update(dt));
+    if (this.particles.length > 900) this.particles.splice(0, this.particles.length - 900);
+    this.effects = this.effects.filter(e => e.update(dt));
+    this.texts = this.texts.filter(t => { t.life -= dt; t.y -= 10 * dt; return t.life > 0; });
+  }
+
+  updateObjects(dt) {
+    const pl = this.player, canHit = this.state === 'playing';
+    for (const o of this.objects) {
+      o.update(dt, this);
+      if (o.state === 'fall') {
+        const bottom = o.y + o.h;
+        const overPlat = o.x > PLATFORM.left - o.w * 0.25 && o.x < PLATFORM.right + o.w * 0.25;
+        if (overPlat && bottom >= PLATFORM.top + 1 && bottom - o.vy * dt <= PLATFORM.top + 6) this.objectImpact(o);
+        else if (o.y + o.h * 0.6 >= this.lavaSurface(o.x)) { o.dead = true; this.splash(o.x, o.type === 'boulder' || o.type === 'anvil' ? 16 : 10); }
+        else if (canHit && pl.invuln <= 0 && aabb(o.hitbox(), pl.hurtbox())) {
+          if (o.type === 'bomb') this.explode(o);
+          else { o.dead = true; this.debris(o, o.y + o.h / 2, 8); this.damagePlayer(o.x); }
+        }
+      } else if (o.state === 'armed') {
+        o.fuse -= dt;
+        if (o.fuse <= 0) this.explode(o);
+      }
+    }
+    this.objects = this.objects.filter(o => !o.dead);
+  }
+
+  // predmet udari u platformu
+  objectImpact(o) {
+    if (o.type === 'bomb') {
+      o.state = 'armed'; o.fuse = o.def.fuseTime; o.y = PLATFORM.top - o.h + 1; o.vy = 0;
+      this.dust(o.x, PLATFORM.top - 1, 3);
+      return;
+    }
+    o.dead = true;
+    const n = o.type === 'boulder' ? 22 : o.type === 'anvil' ? 14 : 10;
+    this.debris(o, PLATFORM.top - 2, n);
+    this.dust(o.x, PLATFORM.top - 1, o.type === 'boulder' ? 10 : 5);
+    if (o.type === 'meteor') {
+      for (let i = 0; i < 12; i++) this.particles.push(new Particle({ x: o.x + rand(-3, 3), y: PLATFORM.top - 2, vx: rand(-60, 60), vy: rand(-90, -20),
+        grav: 150, life: rand(0.3, 0.6), colors: FIRE, size: 2, shrink: true }));
+    }
+    if (o.type === 'boulder') this.addShake(2, 0.25);
+    if (o.type === 'anvil') this.addShake(1, 0.15);
+  }
+  debris(o, y, n) {
+    const cols = DEBRIS[o.type];
+    for (let i = 0; i < n; i++) this.particles.push(new Particle({ x: o.x + rand(-o.w / 3, o.w / 3), y, vx: rand(-70, 70), vy: rand(-130, -40),
+      grav: 380, life: rand(0.5, 0.9), colors: [pick(cols)], size: randi(1, 2), floor: true }));
+  }
+  dust(x, y, n) {
+    for (let i = 0; i < n; i++) this.particles.push(new Particle({ x: x + rand(-3, 3), y, vx: rand(-35, 35), vy: rand(-25, -5), drag: 4,
+      life: rand(0.3, 0.5), colors: ['#d8c8a0', '#a89070', '#7a6048'], size: 2, shrink: true }));
+  }
+  splash(x, n) {
+    const y = this.lavaSurface(x);
+    for (let i = 0; i < n; i++) this.particles.push(new Particle({ x: x + rand(-4, 4), y: y - 1, vx: rand(-45, 45), vy: rand(-150, -60),
+      grav: 380, life: rand(0.5, 0.9), colors: ['#ffe887', '#ffb52e', '#ff8a22', '#c83a16'], size: randi(1, 2) }));
+    for (let i = 0; i < Math.ceil(n / 3); i++) this.particles.push(new Particle({ x: x + rand(-4, 4), y: y - 2, vx: rand(-8, 8), vy: rand(-30, -15),
+      grav: -5, life: rand(0.8, 1.4), colors: ['#6a5a5a', '#4a3e44', '#2e2630'], size: randi(2, 3), noLava: true }));
+  }
+  explode(o) {
+    o.dead = true;
+    const R = o.def.blastRadius, cx = o.x, cy = o.y + o.h / 2;
+    this.effects.push(new Explosion(cx, cy, Math.round(R * 0.85)));
+    for (let i = 0; i < 30; i++) {
+      const a = rand(0, Math.PI * 2), s = rand(40, 140);
+      this.particles.push(new Particle({ x: cx, y: cy, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 30, grav: 120, drag: 2,
+        life: rand(0.3, 0.7), colors: FIRE, size: randi(1, 3), shrink: true, floor: true }));
+    }
+    for (let i = 0; i < 10; i++) this.particles.push(new Particle({ x: cx + rand(-8, 8), y: cy + rand(-6, 2), vx: rand(-15, 15), vy: rand(-30, -10),
+      grav: -10, life: rand(0.8, 1.4), colors: ['#7a6a6a', '#5a4e54', '#3a3240'], size: randi(2, 4), noLava: true }));
+    this.addShake(4, 0.35);
+    if (this.state === 'playing') {
+      const pl = this.player;
+      if (Math.hypot(pl.cx - cx, pl.y + pl.h / 2 - cy) < R) this.damagePlayer(cx);
+    }
+  }
+
+  damagePlayer(srcX) {
+    const pl = this.player;
+    if (this.state !== 'playing' || pl.invuln > 0) return;
+    pl.lives--; pl.invuln = CONFIG.player.invulnTime; pl.hitFlash = 0.12; this.heartFlash = 0.8;
+    pl.vx = (Math.sign(pl.cx - srcX) || 1) * CONFIG.player.knockback; pl.vy = -110; pl.onGround = false; pl.jumping = false;
+    this.addShake(CONFIG.shakeOnHit, CONFIG.shakeTime);
+    for (let i = 0; i < 12; i++) {
+      const a = rand(0, Math.PI * 2), s = rand(50, 120);
+      this.particles.push(new Particle({ x: pl.cx, y: pl.y + 7, vx: Math.cos(a) * s, vy: Math.sin(a) * s, drag: 3,
+        life: rand(0.25, 0.45), colors: ['#ffffff', '#ffe887', '#ff5a5a'] }));
+    }
+    if (pl.lives <= 0) this.killPlayer('hit');
+  }
+  killPlayer(cause) {
+    const pl = this.player;
+    this.state = 'dying'; pl.dead = true; pl.invuln = 0; pl.hitFlash = 0;
+    if (cause === 'lava') { pl.inLava = true; this.splash(pl.cx, 18); this.dyingT = 1.4; }
+    else { pl.vy = -170; pl.vx = 0; this.dyingT = 2.0; }
+    this.addShake(4, 0.4);
+  }
+  gameOver() {
+    this.state = 'gameover';
+    this.overAt = this.uiTime;
+    const s = Math.floor(this.score);
+    this.newRecord = s > this.savedHigh;
+    if (this.newRecord) { this.savedHigh = s; saveHigh(s); }
+  }
+  onWaveCleared(w) {
+    const bonus = CONFIG.waveBonusPerWave * w;
+    this.score += bonus;
+    this.texts.push({ text: '+' + bonus + ' BONUS', x: W / 2, y: 40, life: 1.8, color: '#ffd23f' });
+    const pl = this.player;
+    for (let i = 0; i < 16; i++) this.particles.push(new Particle({ x: pl.cx + rand(-8, 8), y: pl.y + rand(0, 14), vx: rand(-20, 20), vy: rand(-60, -20),
+      life: rand(0.5, 1), colors: ['#ffffff', '#ffd23f', '#ff9a1f'], noLava: true }));
+    return bonus;
+  }
+  addShake(mag, time) { this.shakeMag = Math.max(this.shakeMag, mag); this.shakeT = Math.max(this.shakeT, time); }
+
+  lavaSurface(x) {
+    const t = this.time;
+    return CONFIG.lavaY + Math.round(1.2 * Math.sin(x * 0.11 + t * 2.1) + 0.9 * Math.sin(x * 0.047 - t * 1.3 + 1.0));
+  }
+
+  // mjehurići, žeravica i dim vulkana
+  updateAmbient(dt) {
+    this.emberAcc += dt * 12;
+    while (this.emberAcc >= 1) {
+      this.emberAcc--;
+      this.particles.push(new Particle({ x: rand(0, W), y: CONFIG.lavaY - 1, vx: rand(-6, 6), vy: rand(-28, -10), grav: -3,
+        life: rand(1.5, 4), colors: ['#ffe887', '#ffb52e', '#ff6a1f', '#b8361a', '#5a1a14'], noLava: true }));
+    }
+    this.bubbleAcc += dt * 2.5;
+    while (this.bubbleAcc >= 1) { this.bubbleAcc--; this.bubbles.push({ x: randi(2, W - 3), t: 0, d: rand(0.7, 1.1) }); }
+    this.bubbles = this.bubbles.filter(b => {
+      b.t += dt;
+      if (b.t < b.d) return true;
+      const y = this.lavaSurface(b.x);
+      for (let i = 0; i < 3; i++) this.particles.push(new Particle({ x: b.x, y: y - 2, vx: rand(-25, 25), vy: rand(-70, -30), grav: 300,
+        life: rand(0.3, 0.6), colors: ['#ffe887', '#ffb52e', '#ff6a1f'] }));
+      return false;
+    });
+    for (const c of this.crusts) { c.x += c.sp * dt; if (c.x > W + 20) c.x = -c.w - 20; }
+    this.smokeAcc += dt * 3;
+    while (this.smokeAcc >= 1) {
+      this.smokeAcc--;
+      this.smoke.push({ x: renderer.near.craterX + rand(-2, 2), y: renderer.near.craterY, vx: rand(2, 6), vy: rand(-8, -4), life: rand(3, 5), max: 5 });
+    }
+    this.smoke = this.smoke.filter(s => { s.life -= dt; s.x += s.vx * dt; s.y += s.vy * dt; return s.life > 0; });
+  }
+}
+
+/* =====================================================================
+   Renderer – sve crtanje (svijet, HUD, natpisi, ekrani)
+   ===================================================================== */
+class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.ctx.imageSmoothingEnabled = false;
+    this.sky = buildSky();
+    this.far = buildFar();
+    this.near = buildNear();
+    this.platform = buildPlatform();
+    const R = seeded(31);
+    this.stars = [];
+    while (this.stars.length < 70) {
+      const x = Math.floor(R() * W), y = Math.floor(R() * 100);
+      if (Math.hypot(x - MOON.x, y - MOON.y) < 16) continue;
+      this.stars.push({ x, y, p: R() * 6.28, s: 0.5 + R() * 2.5, c: R() < 0.5 ? '#8f86c8' : '#bfb8ff' });
+    }
+    this.glowGrad = this.ctx.createLinearGradient(0, CONFIG.lavaY - 60, 0, CONFIG.lavaY + 4);
+    this.glowGrad.addColorStop(0, 'rgba(255,90,20,0)');
+    this.glowGrad.addColorStop(1, 'rgba(255,110,30,0.32)');
+  }
+
+  render(game) {
+    const c = this.ctx;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+    c.drawImage(this.sky, 0, 0);
+    for (const s of this.stars) {
+      const b = Math.sin(game.uiTime * s.s + s.p);
+      if (b < -0.4) continue;
+      c.fillStyle = b > 0.75 ? '#ffffff' : s.c; c.fillRect(s.x, s.y, 1, 1);
+    }
+    // treskanje ekrana
+    let ox = 0, oy = 0;
+    if (game.shakeT > 0) {
+      const m = Math.ceil(game.shakeMag * Math.min(1, game.shakeT / 0.15));
+      ox = randi(-m, m); oy = randi(-m, m);
+    }
+    c.translate(ox, oy);
+    this.drawWorld(c, game);
+    c.setTransform(1, 0, 0, 1, 0, 0);
+
+    if (game.state === 'title') { this.drawTitle(c, game); return; }
+    this.drawHUD(c, game);
+    this.drawBanner(c, game);
+    if (game.state === 'paused') this.drawPause(c, game);
+    if (game.state === 'gameover') this.drawGameOver(c, game);
+  }
+
+  drawWorld(c, game) {
+    const pl = game.player, t = game.time;
+    // paralaksa ovisno o položaju igrača
+    const farX = Math.round(-20 - (pl.cx - W / 2) * 0.06), nearX = Math.round(-20 - (pl.cx - W / 2) * 0.12);
+    c.drawImage(this.far, farX, 0);
+    c.drawImage(this.near.canvas, nearX, 0);
+    for (const s of game.smoke) {
+      const k = 1 - s.life / s.max, sz = 2 + Math.floor(k * 4);
+      c.fillStyle = k < 0.4 ? '#3a2a3a' : k < 0.7 ? '#2e2234' : '#24192c';
+      c.fillRect(Math.round(nearX + s.x - sz / 2), Math.round(s.y - sz / 2), sz, sz);
+    }
+    // sjaj kratera
+    c.globalCompositeOperation = 'lighter';
+    c.globalAlpha = 0.6 + 0.2 * Math.sin(t * 3);
+    c.drawImage(SPR.glowOrange, nearX + this.near.craterX - 9, this.near.craterY - 8);
+    c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+
+    c.drawImage(this.platform, PLATFORM.left - 1, PLATFORM.top - PLAT_PAD);
+
+    // sjene predmeta na platformi
+    for (const o of game.objects) {
+      if (o.state !== 'fall' || o.x < PLATFORM.left || o.x > PLATFORM.right) continue;
+      const d = PLATFORM.top - (o.y + o.h), k = clamp(1 - d / 120, 0, 1);
+      const w = Math.round(o.w * (0.3 + 0.5 * k));
+      c.fillStyle = `rgba(20,8,20,${0.2 + 0.4 * k})`;
+      c.fillRect(Math.round(o.x - w / 2), PLATFORM.top, w, 1);
+      if (k > 0.5) c.fillRect(Math.round(o.x - w / 2) + 1, PLATFORM.top + 1, Math.max(1, w - 2), 1);
+    }
+    // upozorenja na vrhu ekrana za predmete koji tek dolaze
+    for (const o of game.objects) {
+      if (o.y + o.h >= 0 || o.state !== 'fall') continue;
+      if (Math.floor(game.uiTime * 8) % 2) continue;
+      const x = Math.round(o.x);
+      c.fillStyle = '#ff4030'; c.fillRect(x - 2, 24, 5, 1); c.fillRect(x - 1, 25, 3, 1); c.fillRect(x, 26, 1, 1);
+    }
+
+    for (const o of game.objects) o.draw(c, game.uiTime);
+    if (game.state !== 'gameover' || !pl.inLava) pl.draw(c);
+
+    this.drawLava(c, game);
+    for (const p of game.particles) p.draw(c);
+    for (const e of game.effects) e.draw(c);
+
+    // sjaj lave preko scene
+    c.globalCompositeOperation = 'lighter';
+    c.globalAlpha = 0.85 + 0.15 * Math.sin(t * 4.3) * Math.sin(t * 1.7);
+    c.fillStyle = this.glowGrad; c.fillRect(-10, CONFIG.lavaY - 60, W + 20, 64);
+    c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+
+    for (const tx of game.texts) drawText(c, tx.text, tx.x, tx.y, tx.color, { align: 'center', shadow: '#000000' });
+  }
+
+  drawLava(c, game) {
+    const L = CONFIG.lavaY;
+    c.fillStyle = '#e8561c'; c.fillRect(-6, L + 5, W + 12, 6);
+    c.fillStyle = '#c83a16'; c.fillRect(-6, L + 11, W + 12, 8);
+    c.fillStyle = '#9a2412'; c.fillRect(-6, L + 19, W + 12, H - L);
+    // ditheriranje između slojeva
+    c.fillStyle = '#c83a16'; for (let x = -6; x < W + 6; x += 2) c.fillRect(x, L + 10, 1, 1);
+    c.fillStyle = '#9a2412'; for (let x = -5; x < W + 6; x += 2) c.fillRect(x, L + 18, 1, 1);
+    // kora i svijetle pruge koje plutaju
+    for (const k of game.crusts) {
+      const x = Math.round(k.x);
+      if (k.streak) { c.fillStyle = '#ffb040'; c.fillRect(x, k.y, k.w, 1); }
+      else {
+        c.fillStyle = '#7e1c10';
+        c.fillRect(x + 1, k.y, k.w - 2, 1); c.fillRect(x, k.y + 1, k.w, 1); c.fillRect(x + 1, k.y + 2, k.w - 2, 1);
+      }
+    }
+    // valovita površina
+    for (let x = -6; x < W + 6; x++) {
+      const h = game.lavaSurface(x);
+      c.fillStyle = '#ffe887'; c.fillRect(x, h, 1, 1);
+      c.fillStyle = '#ffb52e'; c.fillRect(x, h + 1, 1, 2);
+      c.fillStyle = '#ff8a22'; c.fillRect(x, h + 3, 1, Math.max(1, L + 5 - (h + 3)));
+    }
+    // mjehurići
+    for (const b of game.bubbles) {
+      const k = b.t / b.d, y = game.lavaSurface(b.x);
+      if (k < 0.35) { c.fillStyle = '#fff0a0'; c.fillRect(b.x, y, 1, 1); }
+      else if (k < 0.7) { c.fillStyle = '#ffb52e'; c.fillRect(b.x - 1, y, 3, 1); c.fillStyle = '#ffd040'; c.fillRect(b.x, y - 1, 1, 1); }
+      else {
+        c.fillStyle = '#ffb52e'; c.fillRect(b.x - 2, y - 1, 5, 2);
+        c.fillStyle = '#ffe887'; c.fillRect(b.x - 1, y - 2, 3, 1);
+        c.fillStyle = '#ffffff'; c.fillRect(b.x - 1, y - 2, 1, 1);
+      }
+    }
+  }
+
+  drawHUD(c, game) {
+    const pl = game.player, sh = { shadow: '#000000' };
+    // srca
+    for (let i = 0; i < CONFIG.player.lives; i++) {
+      const full = i < pl.lives;
+      let img = full ? SPR.heartFull : SPR.heartEmpty;
+      if (!full && i === pl.lives && game.heartFlash > 0 && Math.floor(game.heartFlash * 12) % 2) img = SPR.heartFull;
+      c.drawImage(img, 3 + i * 10, 3);
+    }
+    // val i preostalo vrijeme
+    const wm = game.waves;
+    drawText(c, 'WAVE ' + wm.wave, W / 2, 3, '#ffffff', { align: 'center', ...sh });
+    const tl = Math.ceil(wm.timeLeft), tstr = Math.floor(tl / 60) + ':' + String(tl % 60).padStart(2, '0');
+    drawText(c, tstr, W / 2, 10, wm.timeLeft < 5 && wm.phase === 'active' ? '#ff8a2a' : '#c8c0e0', { align: 'center', ...sh });
+    const bw = 50, frac = wm.timeLeft / wm.duration(wm.wave);
+    c.fillStyle = '#000000'; c.fillRect(W / 2 - bw / 2 - 1, 17, bw + 2, 4);
+    c.fillStyle = '#3a2a4a'; c.fillRect(W / 2 - bw / 2, 18, bw, 2);
+    c.fillStyle = '#ff9a1f'; c.fillRect(W / 2 - bw / 2, 18, Math.round(bw * frac), 2);
+    c.fillStyle = '#ffe887'; c.fillRect(W / 2 - bw / 2, 18, Math.round(bw * frac), 1);
+    // bodovi i rekord
+    const score = Math.floor(game.score);
+    drawText(c, 'SCORE: ' + score, W - 3, 3, '#ffffff', { align: 'right', ...sh });
+    const hi = game.beatHigh ? score : game.savedHigh;
+    drawText(c, 'HIGH SCORE: ' + hi, W - 3, 10, game.beatHigh ? '#ffd23f' : '#a8a0c8', { align: 'right', ...sh });
+    if (game.newHighTimer > 0 && Math.floor(game.uiTime * 6) % 2 === 0) {
+      drawText(c, 'NEW HIGH SCORE!', W - 3, 17, '#ffd23f', { align: 'right', ...sh });
+    }
+  }
+
+  drawBanner(c, game) {
+    const wm = game.waves;
+    if (wm.phase !== 'banner' || game.state === 'gameover') return;
+    const T = CONFIG.waves.bannerTime, t = wm.timer, inD = 0.4, outD = 0.35;
+    const text = 'WAVE ' + wm.wave, scale = 4, tw = textWidth(text, scale), cx = W / 2 - tw / 2;
+    let x, k;
+    if (t < inD) { x = lerp(-tw - 10, cx, easeOutBack(t / inD)); k = Math.min(1, t / inD * 1.5); }
+    else if (t > T - outD) { const e = (t - (T - outD)) / outD; x = lerp(cx, W + 10, easeInBack(e)); k = 1 - e; }
+    else { x = cx; k = 1; }
+    const bh = Math.round(50 * k), by = 72 - Math.floor(bh / 2);
+    c.fillStyle = 'rgba(8,3,14,0.72)'; c.fillRect(0, by, W, bh);
+    if (bh > 2) { c.fillStyle = '#ff9a1f'; c.fillRect(0, by, W, 1); c.fillRect(0, by + bh - 1, W, 1); }
+    const grad = r => ['#fff3a0', '#ffd23f', '#ffb52e', '#ff8a2a', '#ff5a1f'][r];
+    drawText(c, text, x, 54, grad, { scale, shadow: '#3a0a06', shadowOff: 2, outline: '#1a0606' });
+    if (k > 0.7) {
+      const lines = [];
+      if (wm.wave === 1) lines.push(['IZBJEGAVAJ PREDMETE!', '#ffffff']);
+      if (wm.lastBonus) lines.push(['VAL PREZIVLJEN! BONUS +' + wm.lastBonus, '#ffd23f']);
+      const nt = wm.newTypes(wm.wave).map(k => ({ anvil: 'NAKOVNJI', bomb: 'BOMBE', boulder: 'GROMADE', meteor: 'METEORI' }[k] || k.toUpperCase()));
+      if (nt.length) lines.push(['NOVO: ' + nt.join(', ') + '!', '#ff8a8a']);
+      if (wm.wave === CONFIG.waves.swayStartWave) lines.push(['PREDMETI SKRECU U STRANU!', '#8ad8ff']);
+      lines.slice(0, 2).forEach(([s, col], i) => drawText(c, s, W / 2, 80 + i * 8, col, { align: 'center', shadow: '#000000' }));
+    }
+  }
+
+  drawPanel(c, x, y, w, h) {
+    c.fillStyle = 'rgba(10,5,18,0.82)'; c.fillRect(x, y, w, h);
+    c.fillStyle = '#5a3a6a'; c.fillRect(x, y, w, 1); c.fillRect(x, y + h - 1, w, 1); c.fillRect(x, y, 1, h); c.fillRect(x + w - 1, y, 1, h);
+  }
+
+  drawTitle(c, game) {
+    c.fillStyle = 'rgba(5,2,10,0.45)'; c.fillRect(0, 0, W, H);
+    const title = 'LAVA RAIN', scale = 5, tw = textWidth(title, scale);
+    const grad = r => ['#fff3a0', '#ffd23f', '#ff9a1f', '#ff5a1f', '#d42a1a'][r];
+    for (let i = 0; i < title.length; i++) {
+      const yy = 14 + Math.round(Math.sin(game.uiTime * 3 + i * 0.6) * 2);
+      drawText(c, title[i], W / 2 - tw / 2 + i * 6 * scale, yy, grad, { scale, shadow: '#3a0a06', shadowOff: 2, outline: '#1a0606' });
+    }
+    drawText(c, 'IZBJEGAVAJ PREDMETE KOJI PADAJU S NEBA!', W / 2, 46, '#e0d8ff', { align: 'center', shadow: '#000000' });
+    this.drawPanel(c, 62, 56, 196, 54);
+    drawText(c, 'KONTROLE', W / 2, 60, '#ffd23f', { align: 'center', shadow: '#000000' });
+    const lines = game.isTouch
+      ? ['TIPKE < > - KRETANJE', 'TIPKA ^ - SKOK', 'SMJER + SKOK - SKOK U STRANU', 'TIPKA II - PAUZA']
+      : ['STRELICE ILI A/D - KRETANJE', 'SPACE, W ILI GORE - SKOK', 'SMJER + SKOK - SKOK U STRANU', 'P - PAUZA'];
+    lines.forEach((s, i) => drawText(c, s, W / 2, 70 + i * 9, '#ffffff', { align: 'center', shadow: '#000000' }));
+    if (Math.floor(game.uiTime * 2.5) % 2 === 0) {
+      drawText(c, game.isTouch ? 'DODIRNI EKRAN ZA START' : 'PRITISNI SPACE ZA START', W / 2, 126, '#ffe887', { align: 'center', outline: '#1a0606' });
+    }
+    drawText(c, 'HIGH SCORE: ' + game.savedHigh, W / 2, 140, '#a8a0c8', { align: 'center', outline: '#000000' });
+  }
+
+  drawPause(c, game) {
+    c.fillStyle = 'rgba(5,2,10,0.6)'; c.fillRect(0, 0, W, H);
+    drawText(c, 'PAUZA', W / 2, 62, '#ffffff', { align: 'center', scale: 4, outline: '#000000', shadow: '#3a2a4a', shadowOff: 2 });
+    if (Math.floor(game.uiTime * 2.5) % 2 === 0) drawText(c, game.isTouch ? 'DODIRNI EKRAN ZA NASTAVAK' : 'PRITISNI P ZA NASTAVAK', W / 2, 92, '#ffe887', { align: 'center', outline: '#000000' });
+  }
+
+  drawGameOver(c, game) {
+    c.fillStyle = 'rgba(5,2,10,0.62)'; c.fillRect(0, 0, W, H);
+    const grad = r => ['#ffb0a0', '#ff6a50', '#ff3a2a', '#d42020', '#901010'][r];
+    drawText(c, 'GAME OVER', W / 2, 30, grad, { align: 'center', scale: 4, outline: '#1a0606', shadow: '#300404', shadowOff: 2 });
+    this.drawPanel(c, 70, 60, 180, 52);
+    drawText(c, 'DOSEGNUTI VAL: ' + game.waves.wave, W / 2, 66, '#ffffff', { align: 'center', shadow: '#000000' });
+    drawText(c, 'BODOVI: ' + Math.floor(game.score), W / 2, 78, '#ffffff', { align: 'center', shadow: '#000000' });
+    drawText(c, 'NAJBOLJI REZULTAT: ' + game.savedHigh, W / 2, 90, '#ffd23f', { align: 'center', shadow: '#000000' });
+    if (game.newRecord && Math.floor(game.uiTime * 4) % 2 === 0) drawText(c, 'NOVI REKORD!', W / 2, 101, '#ffe887', { align: 'center', shadow: '#000000' });
+    if (Math.floor(game.uiTime * 2.5) % 2 === 0) drawText(c, game.isTouch ? 'DODIRNI EKRAN ZA PONOVNO' : 'PRITISNI R ZA PONOVNO', W / 2, 124, '#ffe887', { align: 'center', outline: '#000000' });
+  }
+}
+
+/* =====================================================================
+   Pokretanje, skaliranje i game loop (requestAnimationFrame + delta-time)
+   ===================================================================== */
+const canvas = document.getElementById('game');
+buildSprites();
+const renderer = new Renderer(canvas);
+const game = new Game();
+window.game = game;
+
+function resize() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  // na mobitelu koristimo cijeli ekran (necijelo skaliranje), na računalu cijeli broj
+  const scale = CONFIG.integerScaling && !game.isTouch && s >= 2 ? Math.floor(s) : s;
+  canvas.style.width = Math.floor(W * scale) + 'px';
+  canvas.style.height = Math.floor(H * scale) + 'px';
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 150));
+resize();
+
+window.addEventListener('blur', () => {
+  if (game.state === 'playing') game.state = 'paused';
+  Input.keys = {}; Input.touch = {};
+});
+
+/* =====================================================================
+   Kontrole za mobitel – tipke na ekranu (multi-touch, može se kliziti prstom)
+   ===================================================================== */
+function iconURL(rows) {
+  const pad = rows.map(r => '.' + r + '.');
+  const empty = '.'.repeat(pad[0].length);
+  return fromStrings([empty, ...pad, empty], { '#': '#ffffff' }).outline('#1a1020').toCanvas().toDataURL();
+}
+const ICON_LEFT = ['...#....', '..##....', '.#######', '########', '.#######', '..##....', '...#....'];
+const ICONS = {
+  tLeft: ICON_LEFT,
+  tRight: ICON_LEFT.map(r => [...r].reverse().join('')),
+  tJump: ['...##...', '..####..', '.######.', '########', '..####..', '..####..', '..####..'],
+  tPause: ['##..##', '##..##', '##..##', '##..##', '##..##', '##..##'],
+};
+const TOUCH_BTNS = [['tLeft', 'ArrowLeft'], ['tRight', 'ArrowRight'], ['tJump', 'Space'], ['tPause', 'KeyP']]
+  .map(([id, code]) => {
+    const el = document.getElementById(id);
+    el.style.backgroundImage = `url(${iconURL(ICONS[id])})`;
+    return { el, code };
+  });
+
+function enableTouch() {
+  if (game.isTouch) return;
+  game.isTouch = true;
+  document.body.classList.add('touch');
+  resize();
+}
+if (window.matchMedia) {
+  const mq = matchMedia('(pointer: coarse)');
+  if (mq.matches) enableTouch();
+  if (mq.addEventListener) mq.addEventListener('change', () => { if (mq.matches) enableTouch(); });
+}
+
+function goFullscreen() {
+  const d = document.documentElement, fn = d.requestFullscreen || d.webkitRequestFullscreen;
+  if (!fn || document.fullscreenElement || document.webkitFullscreenElement) return;
+  try {
+    const p = fn.call(d);
+    const lock = () => { try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) { /* nije podržano */ } };
+    if (p && p.then) p.then(lock).catch(() => {}); else lock();
+  } catch (e) { /* npr. iPhone ne podržava fullscreen */ }
+}
+
+function onTouch(e) {
+  e.preventDefault();
+  enableTouch();
+  if (e.type === 'touchstart') Input.pressed.Tap = true;
+  // koja je tipka trenutno pritisnuta (svi prsti), s malo većom zonom dodira
+  const now = {};
+  for (const t of e.touches) {
+    for (const b of TOUCH_BTNS) {
+      const r = b.el.getBoundingClientRect(), p = 12;
+      if (t.clientX >= r.left - p && t.clientX <= r.right + p && t.clientY >= r.top - p && t.clientY <= r.bottom + p) now[b.code] = true;
+    }
+  }
+  for (const b of TOUCH_BTNS) {
+    const is = !!now[b.code];
+    if (is && !Input.touch[b.code]) Input.pressed[b.code] = true;
+    Input.touch[b.code] = is;
+    b.el.classList.toggle('down', is);
+  }
+  // fullscreen se smije tražiti tek kad prst pusti ekran
+  if (e.type === 'touchend' && game.wantFullscreen) { game.wantFullscreen = false; goFullscreen(); }
+}
+for (const ev of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) document.addEventListener(ev, onTouch, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault()); // iOS pinch-zoom
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+// poruka "okreni mobitel" (pikselasti crtež istim fontom)
+(function drawRotateHint() {
+  const rc = document.getElementById('rotateCanvas'), g = rc.getContext('2d');
+  rc.style.imageRendering = 'pixelated';
+  g.fillStyle = '#07040c'; g.fillRect(0, 0, rc.width, rc.height);
+  const phone = (x, y, w, h) => {
+    g.fillStyle = '#e0d8ff'; g.fillRect(x, y, w, h);
+    g.fillStyle = '#2a1a3c'; g.fillRect(x + 2, y + 2, w - 4, h - 4);
+  };
+  phone(48, 4, 14, 24);
+  phone(92, 9, 24, 14);
+  g.fillStyle = '#ffd23f';
+  for (let i = 0; i < 14; i++) g.fillRect(68 + i, 16 - Math.round(Math.sin(i / 13 * Math.PI) * 5), 1, 1);
+  g.fillRect(80, 13, 1, 1); g.fillRect(80, 15, 1, 1); g.fillRect(79, 16, 3, 1);
+  drawText(g, 'OKRENI MOBITEL', 80, 38, t => ['#fff3a0', '#ffd23f', '#ff9a1f', '#ff5a1f', '#d42a1a'][t], { align: 'center', shadow: '#3a0a06' });
+  drawText(g, 'IGRA SE NA SIRINU EKRANA', 80, 50, '#a8a0c8', { align: 'center' });
+})();
+
+const STEP = 1 / 120; // fizika u pod-koracima, ista brzina na 60/144 Hz
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.1) dt = 0.1;
+  if (dt < 0) dt = 0;
+  game.uiTime += dt;
+  // uspravan mobitel = automatska pauza
+  if (game.isTouch && window.innerHeight > window.innerWidth && game.state === 'playing') game.state = 'paused';
+  game.handleInput();
+  const steps = Math.ceil(dt / STEP);
+  for (let i = 0; i < steps; i++) game.update(dt / steps);
+  renderer.render(game);
+  Input.endFrame();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
